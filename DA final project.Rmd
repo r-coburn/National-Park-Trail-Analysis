@@ -1,0 +1,227 @@
+---
+title: "Untitled"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(car)
+library(leaps)
+library(rms)
+library(ggfortify)
+library(GGally)
+library(ggcorrplot)
+library(sandwich)
+library(lmtest)
+setwd("~/Desktop/Denison/DA/DA 220/Final Project")
+trails <- read.csv("AllTrails data - nationalpark.csv")
+t1 <- read.csv("All National Parks Visitation 1904-2016.csv")
+```
+
+The goal of this dataset is to show what aspects of different trail lead to them having higher popularity among its users. The reason I'm exploring this is because the outdoors are more important than even in a globabl pandemic. Being outside have been linked to higher vitamin D levels, more exercise which improves mood, greater happiness, better concentration, and most importantly, a boosted immune system. If people are able to find what makes an outdoors spot popular, they may be able to better take advantage of these benefits linked to being outside
+
+```{r}
+t1 <- t1 %>% filter(YearRaw == 2016)
+t1 <- t1 %>% rename("area_name" = Unit.Name)
+t2 <- merge(trails, t1, by = "area_name")
+trails1 <- t2 %>%
+  select(area_name, popularity:num_reviews, Region, Visitors)
+
+trails2 <- trails1 %>%
+  mutate(point = ifelse(route_type == "point to point", 1, 0), 
+         out = ifelse(route_type == "out and back", 1, 0), 
+         loop = ifelse(route_type == "loop", 1, 0), 
+         Alaska = ifelse(Region == "AK", 1, 0), 
+         innerMountain = ifelse(Region == "IM", 1, 0), 
+         midwest = ifelse(Region == "MW", 1, 0), 
+         newEngland = ifelse(Region == "NE", 1, 0), 
+         pacific = ifelse(Region == "PW", 1, 0), 
+         southeast = ifelse(Region == "SE", 1, 0), 
+         gradient = atan2(elevation_gain, length))
+
+
+train<-sample_frac(trails2, 0.6)
+sid<-as.numeric(rownames(train))
+test<-trails2[-sid,]
+
+str(train)
+```
+
+We first need to do some data cleaning. We first need to rename the Unit.name variable in the second dataset to be able to merge with the first dataset. After this, we're able to select out the important numeric and factor variables that we need for our linear regression. We also need to change our factor variables into 0 1 variables to be run through the best subsets command. We also want to add a gradient variable which describes how much elevation gain that a trail has for its length. Finally, we can break up our data into training and testing sets using the sample_frac() command. 
+
+```{r}
+train1 <- train %>%
+  select(-area_name, -route_type, -Region, -visitor_usage)
+
+ggcorrplot(cor(train1), method = NULL, type = "lower", outline.color = "white")
+
+train1 <- train1 %>% select(-length, -southeast, -loop)
+```
+
+This correlation matrix plot indicates that length and elevation gain, Visitors and southeast, and out and loop are highly correlated. We want to remove one of each of these pairs as to not lose significance when it comes to building our model out of these variables. 
+
+```{r}
+train3 <- train1 %>%
+  mutate(squarePop = popularity^2) %>%
+  select(-popularity)
+
+train1 %>%
+  ggplot(aes(num_reviews, popularity)) +
+  geom_point() + 
+  stat_smooth(method = "lm")
+
+train3 %>%
+  ggplot(aes(num_reviews, squarePop)) +
+  geom_point() + 
+  stat_smooth(method = "lm")
+```
+
+This initial plot indicated that the data is roughly a sqrt(x) kind of plot. In order to linearize this data, we must take the square root of the y axis. This can be seen by our second plot with popularity squared which looks much more linear that the first plot. 
+
+```{r}
+best.subset <- regsubsets(popularity~.,train1,nvmax = 15)
+sum <- summary(best.subset)
+sum$outmat
+
+reg <- lm(popularity~num_reviews+avg_rating+difficulty_rating+gradient+point+innerMountain+pacific, data = train1)
+summary(reg)
+
+reg1 <- lm(popularity~num_reviews+avg_rating+difficulty_rating+point+innerMountain+pacific, data = train1)
+summary(reg1)
+```
+
+As we saw from the previous scatterplots, the square of popularity better linearizes the data. However, we will still run a regression with just normal popularity. Best subsets indicates which model is the best to run and we can see that it produces a pretty good model. All but one of the variables are very statistically significant. We also have an R-squared of 0.7932 which tells us that 79.32% of the variation in popularity can be accounted for by the x variables that we chose. We then run a robust standard error output which we can see doesn't really change too much. This even with the fact that the standard errors have increased. 
+
+```{r}
+train5 <- train1 %>% mutate(res = resid(reg1)) %>% mutate(fit = fitted(reg1))
+
+train5 %>%
+  ggplot(aes(res))+
+  geom_histogram()
+
+train5 %>%
+  ggplot(aes(fit,res))+
+  geom_point()
+```
+
+Our residual histogram looks good and roughly normally distributed. However, the residual scatterplot looks very heteroscedastic and quadratic, again indicating that we may want to square our y-variable, popularity. 
+
+```{r}
+best.subset <- regsubsets(squarePop~.,train3,nvmax = 13)
+sum <- summary(best.subset)
+sum$outmat
+
+null <- lm(squarePop~1, train3)
+full <- lm(squarePop~., train3)
+step(null, scope=list(lower=null, upper=full),direction="forward")
+
+reg <- lm(formula = squarePop ~ num_reviews + pacific + innerMountain + avg_rating + elevation_gain + Visitors + newEngland, data = train3)
+summary(reg)
+
+reg1 <- lm(formula = squarePop ~ num_reviews + pacific + innerMountain + elevation_gain + avg_rating + midwest, data = train3)
+summary(reg1)
+
+reg2 <- lm(squarePop ~ elevation_gain + num_reviews + pacific + avg_rating + midwest + Visitors:newEngland, data=train3)
+summary(reg2)
+
+coeftest(reg, vcov = vcovHC(reg, type = "HC1"))
+coeftest(reg1,vcov = vcovHC(reg1, type = "HC1"))
+coeftest(reg2,vcov = vcovHC(reg2, type = "HC1"))
+```
+
+Now that we've squared popularity, we decided to run a best subsets and stepwise to see which variables to include in our regression. The final stepwise model told us to use num_reviews, pacific, innerMountain, avg_rating, difficulty_rating, and midwest while the best subsets model told us to run a regression with num_reviews, pacific, innerMountain, avg_rating, elevation_gain, Visitors, and newEngland. These produced almost similar R-squared values, but the stepwise regression gave us more significant variables. Again, this significance is confirmed by using our robust standard errors also being statistically significant. 
+
+We also hypothesized that there may be some sort of interaction between the number of visitors a trail has and its region. That is, more populous regions or regions where the population density is greater, may see more visitors. This hypothesis was more or less confirmed with such a statistically significant p-value followed by an even more significant p-value using robust standard errors. 
+
+```{r}
+train4 <- train3 %>% mutate(res = resid(reg1)) %>% mutate(fit = fitted(reg1))
+
+train4 %>%
+  ggplot(aes(res))+
+  geom_histogram()
+
+train4 %>%
+  ggplot(aes(fit,res))+
+  geom_point()
+```
+
+We have similar situation with our residual plots that we did last time. Our residual histogram looks relatively normally distributed but our residual histogram looks a bit heteroscedastic. This violates our model assumptions so we will have to be very selective in choosing which variables to include in our final model. 
+
+```{r}
+train8 <- train3 %>%
+  mutate(logRating = log(avg_rating+1)) %>%
+  select(-avg_rating)
+
+best.subset <- regsubsets(squarePop~.,train8,nvmax = 13)
+sum <- summary(best.subset)
+sum$outmat
+
+null <- lm(squarePop~1, train8)
+full <- lm(squarePop~., train8)
+step(null, scope=list(lower=null, upper=full),direction="forward")
+
+reg <- lm(formula = squarePop ~ num_reviews + pacific + innerMountain + elevation_gain + logRating + pacific:Visitors, data = train8)
+summary(reg)
+
+coeftest(reg, vcov = vcovHC(reg, type = "HC1"))
+```
+
+Finally, we want to see what will happen when we decide to log our avg_rating variable and add another interaction term. This didn't seem to work too well. Although we still have a good R-squared, we lose some significance in the avg_rating variable by logging it. This will not be a variable that we include in the final model. 
+
+```{r}
+test1 <- test %>% mutate(squarePop = popularity^2) %>% select(-popularity)
+
+finalModel <- lm(squarePop ~  num_reviews + pacific + avg_rating + innerMountain, data=test1)
+summary(finalModel)
+coeftest(finalModel,vcov = vcovHC(finalModel,type = "HC1"))
+```
+
+This is our final model based on which variables will best predict popularity squared. Bear in mind, when choosing variables for the final model, we had to be very picky about which variables to include and only choose those which the highest p-value. Doing this, we get an R-squared of 0.9383 which tells us that 93.83% of the variation in popularity squared is explained by num_reviews, pacific, avg_rating, and innerMountain. We also can see that for any 1 unit increase in num_reviews, pacific, avg_rating, and innerMountin, we would expect popularity squared to increase by 1.985, 45.622, 8.216, and 20.872 respectively. Again, this model is validataed by using our robust standard errors. 
+
+```{r}
+test2 <- test1 %>% mutate(res = resid(finalModel)) %>% mutate(fit = fitted(finalModel))
+
+test2 %>%
+  ggplot(aes(res))+
+  geom_histogram()
+
+test2 %>%
+  ggplot(aes(fit,res))+
+  geom_point()
+```
+
+Testing our model assumptions, we see a similar result. We have a good residual histogram and a kind of conical residual scatterplot. 
+
+```{r}
+confint(finalModel)
+
+newdata = data.frame(num_reviews = 100, pacific = 1, avg_rating = 4.5, innerMountain = 0)
+predict(finalModel,newdata,interval = "predict")
+
+sqrt(10.829)
+sqrt(235.8033)
+sqrt(460.7776)
+```
+
+Our confidence interval of the final model reveals what the p-values in the regression told us. We can see that 0 is not contained or even close to being contained in any of the intervals. Note that pacific and innerMountain have such high coefficients because they are 0 1 variables and not continuous like avg_rating and num_reviews. 
+
+Finally, running a prediction for a trail with 100 reviews, in the pacific region, and with an average rating of 4.5, we can see that we are predicted a popularity squared of anywhere from 10.829 to 460.778 but the fitted value is 235.803. Taking the square root of these to find the popularity, we find that the popularity ranges any where from 3.29 to 21.47 with a fitted value of 15.36. 
+
+
+Overall, we were able to build a very effective model which accounted for more than 90% of the variation in our dependent variable. What comes next? Well, I'd like to test and see if being outdoors really has the benefits that are associated with it. Most importantly, I'd like to see if being outside is an effective treatment for COVID-19, or rather, any viral disease. We'd likely have to perform an experiment rather than a study to imply causation for the benefits of being outside. 
+
+
+
+
+
+
+
+
+
